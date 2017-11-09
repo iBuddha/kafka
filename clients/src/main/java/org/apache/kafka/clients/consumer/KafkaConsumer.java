@@ -3,9 +3,9 @@
  * file distributed with this work for additional information regarding copyright ownership. The ASF licenses this file
  * to You under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the
  * License. You may obtain a copy of the License at
- *
+ * <p>
  * http://www.apache.org/licenses/LICENSE-2.0
- *
+ * <p>
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
  * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
  * specific language governing permissions and limitations under the License.
@@ -551,8 +551,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                          Deserializer<K> keyDeserializer,
                          Deserializer<V> valueDeserializer) {
         this(new ConsumerConfig(ConsumerConfig.addDeserializerToConfig(configs, keyDeserializer, valueDeserializer)),
-            keyDeserializer,
-            valueDeserializer);
+                keyDeserializer,
+                valueDeserializer);
     }
 
     /**
@@ -582,8 +582,8 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                          Deserializer<K> keyDeserializer,
                          Deserializer<V> valueDeserializer) {
         this(new ConsumerConfig(ConsumerConfig.addDeserializerToConfig(properties, keyDeserializer, valueDeserializer)),
-             keyDeserializer,
-             valueDeserializer);
+                keyDeserializer,
+                valueDeserializer);
     }
 
     @SuppressWarnings("unchecked")
@@ -1003,6 +1003,51 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         }
     }
 
+
+    public ConsumerRecords<K, V> poll(boolean enablePreFetch, int maxPollRecords, int maxFetchSize, long timeout) {
+        acquire();
+        try {
+            if (timeout < 0)
+                throw new IllegalArgumentException("Timeout must not be negative");
+
+            if (this.subscriptions.hasNoSubscriptionOrUserAssignment())
+                throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
+
+            // poll for new data until the timeout expires
+            long start = time.milliseconds();
+            long remaining = timeout;
+            do {
+                Map<TopicPartition, List<ConsumerRecord<K, V>>> records =
+                        pollOnce(remaining, maxPollRecords, maxFetchSize);
+                if (!records.isEmpty()) {
+                    // before returning the fetched records, we can send off the next round of fetches
+                    // and avoid block waiting for their responses to enable pipelining while the user
+                    // is handling the fetched records.
+                    //
+                    // NOTE: since the consumed position has already been updated, we must not allow
+                    // wakeups or any other errors to be triggered prior to returning the fetched records.
+                    if (enablePreFetch) {
+                        fetcher.sendFetches();
+                        client.pollNoWakeup();
+                    }
+
+                    if (this.interceptors == null)
+                        return new ConsumerRecords<>(records);
+                    else
+                        return this.interceptors.onConsume(new ConsumerRecords<>(records));
+                }
+
+                long elapsed = time.milliseconds() - start;
+                remaining = timeout - elapsed;
+            } while (remaining > 0);
+
+            return ConsumerRecords.empty();
+        } finally {
+            release();
+        }
+    }
+
+
     /**
      * Do one round of polling. In addition to checking for new data, this does any needed offset commits
      * (if auto-commit is enabled), and offset resets (if an offset reset policy is defined).
@@ -1017,6 +1062,43 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
         if (!subscriptions.hasAllFetchPositions())
             updateFetchPositions(this.subscriptions.missingFetchPositions());
 
+        // if data is available already, return it immediately
+        Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
+        if (!records.isEmpty())
+            return records;
+        // send any new fetches (won't resend pending fetches)
+        fetcher.sendFetches();
+
+        long now = time.milliseconds();
+        long pollTimeout = Math.min(coordinator.timeToNextPoll(now), timeout);
+
+        client.poll(pollTimeout, now, new PollCondition() {
+            @Override
+            public boolean shouldBlock() {
+                // since a fetch might be completed by the background thread, we need this poll condition
+                // to ensure that we do not block unnecessarily in poll()
+                return !fetcher.hasCompletedFetches();
+            }
+        });
+
+        // after the long poll, we should check whether the group needs to rebalance
+        // prior to returning data so that the group can stabilize faster
+        if (coordinator.needRejoin())
+            return Collections.emptyMap();
+
+        return fetcher.fetchedRecords();
+    }
+
+
+    private Map<TopicPartition, List<ConsumerRecord<K, V>>> pollOnce(long timeout, int maxPollRecords, int maxFetchSize) {
+        coordinator.poll(time.milliseconds());
+
+        // fetch positions if we have partitions we're subscribed to that we
+        // don't know the offset for
+        if (!subscriptions.hasAllFetchPositions())
+            updateFetchPositions(this.subscriptions.missingFetchPositions());
+        fetcher.setMaxPollRecords(maxPollRecords);
+        fetcher.setMaxBytes(maxFetchSize);
         // if data is available already, return it immediately
         Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
         if (!records.isEmpty())
@@ -1354,7 +1436,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     public void pause(Collection<TopicPartition> partitions) {
         acquire();
         try {
-            for (TopicPartition partition: partitions) {
+            for (TopicPartition partition : partitions) {
                 log.debug("Pausing partition {}", partition);
                 subscriptions.pause(partition);
             }
@@ -1373,7 +1455,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     public void resume(Collection<TopicPartition> partitions) {
         acquire();
         try {
-            for (TopicPartition partition: partitions) {
+            for (TopicPartition partition : partitions) {
                 log.debug("Resuming partition {}", partition);
                 subscriptions.resume(partition);
             }
@@ -1483,7 +1565,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
     private ClusterResourceListeners configureClusterResourceListeners(Deserializer<K> keyDeserializer, Deserializer<V> valueDeserializer, List<?>... candidateLists) {
         ClusterResourceListeners clusterResourceListeners = new ClusterResourceListeners();
-        for (List<?> candidateList: candidateLists)
+        for (List<?> candidateList : candidateLists)
             clusterResourceListeners.maybeAddAll(candidateList);
 
         clusterResourceListeners.maybeAdd(keyDeserializer);

@@ -80,11 +80,11 @@ public class Fetcher<K, V> {
     private final ConsumerNetworkClient client;
     private final Time time;
     private final int minBytes;
-    private final int maxBytes;
+    private int maxBytes;
     private final int maxWaitMs;
     private final int fetchSize;
     private final long retryBackoffMs;
-    private final int maxPollRecords;
+    private int maxPollRecords;
     private final boolean checkCrcs;
     private final Metadata metadata;
     private final FetchManagerMetrics sensors;
@@ -421,7 +421,7 @@ public class Fetcher<K, V> {
                 if (completedFetch == null)
                     break;
 
-                nextInLineRecords = parseFetchedData(completedFetch);
+                nextInLineRecords = parseFetchedData(completedFetch, recordsRemaining);
             } else {
                 TopicPartition partition = nextInLineRecords.partition;
 
@@ -655,7 +655,7 @@ public class Fetcher<K, V> {
     /**
      * The callback for fetch completion
      */
-    private PartitionRecords<K, V> parseFetchedData(CompletedFetch completedFetch) {
+    private PartitionRecords<K, V> parseFetchedData(CompletedFetch completedFetch, int maxRecordNum) {
         TopicPartition tp = completedFetch.partition;
         FetchResponse.PartitionData partition = completedFetch.partitionData;
         long fetchOffset = completedFetch.fetchedOffset;
@@ -684,13 +684,14 @@ public class Fetcher<K, V> {
                 List<ConsumerRecord<K, V>> parsed = new ArrayList<>();
                 for (LogEntry logEntry : records) {
                     // Skip the messages earlier than current position.
-                    if (logEntry.offset() >= position) {
+                    if (logEntry.offset() >= position && recordsCount < maxRecordNum) {
                         parsed.add(parseRecord(tp, logEntry));
                         bytes += logEntry.size();
+                        recordsCount ++;
                     }
                 }
 
-                recordsCount = parsed.size();
+//                recordsCount = parsed.size();
                 this.sensors.recordTopicFetchMetrics(tp.topic(), bytes, recordsCount);
 
                 if (!parsed.isEmpty()) {
@@ -771,6 +772,14 @@ public class Fetcher<K, V> {
             throw new SerializationException("Error deserializing key/value for partition " + partition +
                     " at offset " + logEntry.offset(), e);
         }
+    }
+
+    public void setMaxPollRecords(int maxPollRecords) {
+        this.maxPollRecords = maxPollRecords;
+    }
+
+    public void setMaxBytes(int maxBytes) {
+        this.maxBytes = maxBytes;
     }
 
     private static class PartitionRecords<K, V> {
